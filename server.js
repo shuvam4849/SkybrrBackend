@@ -65,70 +65,16 @@ connectDB();
 // USER DELETION & SYNC LISTENERS
 // ============================================
 
-if (admin.apps.length > 0) {
-  try {
-    // Import the User model
-    const User = require('./models/User');
-    
-    // Listen for user deletion from Firebase Auth
-    admin.auth().onUserDeleted(async (user) => {
-      try {
-        console.log(`🗑️ Firebase user deleted: ${user.uid}`);
-        
-        // 1. Delete from Firestore users collection
-        const firestore = admin.firestore();
-        await firestore.collection('users').doc(user.uid).delete();
-        console.log(`✅ Deleted from Firestore: ${user.uid}`);
-        
-        // 2. Delete from MongoDB
-        const deleted = await User.findOneAndDelete({ firebaseUid: user.uid });
-        if (deleted) {
-          console.log(`✅ Deleted from MongoDB: ${user.uid} (${deleted.email})`);
-        } else {
-          console.log(`⚠️ User not found in MongoDB: ${user.uid}`);
-        }
-        
-        // 3. Clean up related data
-        await cleanupUserData(user.uid);
-        
-      } catch (error) {
-        console.error(`❌ Error deleting user ${user.uid}:`, error);
-      }
-    });
-    
-    console.log('✅ User deletion listener initialized');
-    
-    // Listen for user creation to auto-sync
-    admin.auth().onUserCreated(async (user) => {
-      try {
-        console.log(`👤 New Firebase user created: ${user.uid}`);
-        
-        // Auto-sync new user to MongoDB after delay
-        setTimeout(() => {
-          syncNewUserToBackend(user.uid);
-        }, 5000);
-        
-      } catch (error) {
-        console.error(`❌ Error handling new user ${user.uid}:`, error);
-      }
-    });
-    
-    console.log('✅ User creation listener initialized');
-    
-    // Start periodic sync cron job (every 6 hours)
-    const syncJob = new CronJob('0 */6 * * *', async () => {
-      console.log('🔄 Running periodic user sync check...');
-      await periodicSyncCheck();
-    });
-    syncJob.start();
-    console.log('✅ Periodic sync job started (every 6 hours)');
-    
-  } catch (error) {
-    console.error('❌ Failed to setup user sync listeners:', error.message);
-  }
-} else {
-  console.log('⚠️ Skipping user sync listeners - Firebase not initialized');
-}
+app.delete('/api/user/:firebaseUid', async (req, res) => {
+  const { firebaseUid } = req.params;
+
+  await admin.auth().deleteUser(firebaseUid);
+  await admin.firestore().collection('users').doc(firebaseUid).delete();
+  await User.findOneAndDelete({ firebaseUid });
+  await cleanupUserData(firebaseUid);
+
+  res.json({ success: true });
+});
 
 // Helper function to clean up user-related data
 async function cleanupUserData(firebaseUid) {

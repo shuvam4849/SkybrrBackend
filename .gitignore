@@ -1,1 +1,54 @@
-node_modules
+# Firebase Service Account - NEVER COMMIT
+serviceAccountKey.json
+service-account-*.json
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.development
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Uploads (Render filesystem is temporary)
+uploads/
+
+# Logs
+logs
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+
+# Optional npm cache
+.npm
+
+# REPL history
+.node_repl_history
+
+# Compiled addons
+build/Release
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
