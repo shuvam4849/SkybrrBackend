@@ -271,12 +271,11 @@ router.post('/resync-all-users', async (req, res) => {
   }
 });
 
-// ============================================
-// SIMPLE TOKEN EXTRACTION (FIXED)
-// ============================================
-const extractUserFromToken = (req, res, next) => {
+// In routes/auth.js, replace extractUserFromToken function:
+
+const extractUserFromToken = async (req, res, next) => {
   try {
-    console.log('\n🔐 === TOKEN EXTRACTION ===');
+    console.log('\n🔐 === TOKEN EXTRACTION & VERIFICATION ===');
     
     const authHeader = req.headers.authorization;
     
@@ -290,28 +289,40 @@ const extractUserFromToken = (req, res, next) => {
     console.log('📌 Token received, length:', token.length);
     
     try {
-      // Decode the token without verification
-      const decoded = jwt.decode(token);
-      
-      if (!decoded) {
-        console.log('❌ Failed to decode token');
+      // ✅ VERIFY token with Firebase (not just decode)
+      if (!req.firebaseAdmin || !req.firebaseAdmin.getAuth) {
+        console.log('❌ Firebase Auth not available');
         req.user = null;
         return next();
       }
       
-      console.log('✅ Token decoded successfully');
+      const auth = req.firebaseAdmin.getAuth();
+      const decodedToken = await auth.verifyIdToken(token);
       
-      // Store basic info for now
-      req.user = {
-        firebaseUid: decoded.user_id || decoded.sub || decoded.uid,
-        token: token,
-        decoded: decoded
-      };
+      console.log('✅ Token verified successfully for user:', decodedToken.uid);
       
+      // Find or create user in MongoDB
+      const User = require('../models/User');
+      let user = await User.findOne({ firebaseUid: decodedToken.uid });
+      
+      if (!user) {
+        // Create minimal user if not exists
+        user = await User.create({
+          firebaseUid: decodedToken.uid,
+          name: decodedToken.name || decodedToken.email?.split('@')[0] || 'User',
+          email: decodedToken.email || `${decodedToken.uid}@skybrr.com`,
+          profilePicture: decodedToken.picture || null,
+          isOnline: false,
+          lastSeen: new Date()
+        });
+        console.log('✅ Created new user during token verification');
+      }
+      
+      req.user = user;
       next();
       
-    } catch (decodeError) {
-      console.log('❌ Token decode error:', decodeError.message);
+    } catch (verifyError) {
+      console.log('❌ Token verification failed:', verifyError.message);
       req.user = null;
       next();
     }
