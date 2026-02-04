@@ -255,12 +255,25 @@ const accessChat = async (req, res) => {
     if (!targetUser) {
       console.log('🔄 [3/6] Target user not found, attempting Firebase sync...');
       try {
-        // Import Firebase Admin dynamically to avoid circular dependencies
-        const admin = require('firebase-admin');
-        console.log('✅ [3/6] Firebase Admin imported successfully');
-        
-        const firebaseUser = await admin.auth().getUser(userId);
-        console.log('✅ [3/6] Firebase user fetched:', firebaseUser.uid);
+        // Replace with:
+if (!req.firebaseAdmin || !req.firebaseAdmin.getAuth) {
+  console.log('❌ [3/6] Firebase not available in request');
+  return res.status(500).json({
+    success: false,
+    message: 'Firebase service not available'
+  });
+}
+
+const auth = req.firebaseAdmin.getAuth();
+if (!auth) {
+  console.log('❌ [3/6] Firebase Auth not available');
+  return res.status(500).json({
+    success: false,
+    message: 'Firebase Auth service not available'
+  });
+}
+
+const firebaseUser = await auth.getUser(userId);;
         
         targetUser = await User.create({
           firebaseUid: userId,

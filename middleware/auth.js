@@ -1,4 +1,3 @@
-const admin = require('firebase-admin');
 const User = require('../models/User');
 
 // Authentication middleware
@@ -20,8 +19,17 @@ const protect = async (req, res, next) => {
     }
 
     try {
-      // Verify Firebase token
-      const decodedToken = await admin.auth().verifyIdToken(token);
+      // ✅ Use Firebase Admin from request (passed by main server)
+      if (!req.firebaseAdmin || !req.firebaseAdmin.getAuth) {
+        console.log('❌ Firebase Admin not available in request');
+        return res.status(500).json({
+          success: false,
+          message: 'Authentication service not available'
+        });
+      }
+      
+      const auth = req.firebaseAdmin.getAuth();
+      const decodedToken = await auth.verifyIdToken(token);
       console.log('✅ Firebase token verified for user:', decodedToken.uid);
       
       // Find user by Firebase UID
@@ -29,7 +37,7 @@ const protect = async (req, res, next) => {
       
       if (!user) {
         // Get user info from Firebase
-        const firebaseUser = await admin.auth().getUser(decodedToken.uid);
+        const firebaseUser = await auth.getUser(decodedToken.uid);
         
         user = await User.create({
           firebaseUid: decodedToken.uid,

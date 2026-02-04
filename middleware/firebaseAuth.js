@@ -1,57 +1,18 @@
-const admin = require('firebase-admin');
-const path = require('path');
-const fs = require('fs');
-
-// Initialize Firebase Admin using Service Account JSON file
-const initializeFirebaseAdmin = () => {
-  if (!admin.apps.length) {
-    try {
-      // Load the service account key from JSON file
-      const serviceAccountPath = path.join(__dirname, '../serviceAccountKey.json');
-      
-      // Check if file exists
-      if (!fs.existsSync(serviceAccountPath)) {
-        console.log('⚠️  serviceAccountKey.json not found - Firebase Admin disabled');
-        return null;
-      }
-      
-      // Read and parse the service account file
-      const serviceAccountData = fs.readFileSync(serviceAccountPath, 'utf8');
-      const serviceAccount = JSON.parse(serviceAccountData);
-      
-      // Ensure private key has proper newlines
-      if (serviceAccount.private_key) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-      }
-      
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-        databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
-      });
-      
-      console.log('✅ Firebase Admin initialized for project:', serviceAccount.project_id);
-      return admin;
-    } catch (error) {
-      console.error('❌ Failed to initialize Firebase Admin:', error.message);
-      console.error('Error details:', error);
-      return null;
-    }
-  }
-  return admin;
-};
-
-const adminInstance = initializeFirebaseAdmin();
+const User = require('../models/User');
+const firebaseAdmin = require('../config/firebase-admin'); // ✅ USE SHARED MODULE
 
 const firebaseProtect = async (req, res, next) => {
   let token;
 
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
     try {
-      if (!adminInstance) {
-        console.log('❌ Firebase Admin not initialized');
-        return res.status(401).json({
+      // ✅ Use shared Firebase module
+      const auth = firebaseAdmin.getAuth();
+      if (!auth) {
+        console.log('❌ Firebase Auth not initialized');
+        return res.status(500).json({
           success: false,
-          message: 'Firebase Admin not configured'
+          message: 'Firebase authentication service not available'
         });
       }
 
@@ -59,12 +20,11 @@ const firebaseProtect = async (req, res, next) => {
       token = req.headers.authorization.split(' ')[1];
 
       // Verify token with Firebase Admin
-      const decodedToken = await adminInstance.auth().verifyIdToken(token);
+      const decodedToken = await auth.verifyIdToken(token);
       
       console.log('✅ Firebase token verified for user:', decodedToken.uid);
       
       // Get user from our database
-      const User = require('../models/User');
       let user = await User.findOne({ firebaseUid: decodedToken.uid });
       
       if (!user) {
@@ -73,7 +33,7 @@ const firebaseProtect = async (req, res, next) => {
           // Create user in our database
           user = await User.create({
             firebaseUid: decodedToken.uid,
-            name: decodedToken.name || decodedToken.email.split('@')[0],
+            name: decodedToken.name || decodedToken.email?.split('@')[0] || 'User',
             email: decodedToken.email,
             profilePicture: decodedToken.picture || '',
             phone: decodedToken.phone_number || '',
@@ -98,7 +58,7 @@ const firebaseProtect = async (req, res, next) => {
               // Create a minimal user as last resort
               user = await User.create({
                 firebaseUid: decodedToken.uid,
-                name: decodedToken.name || decodedToken.email.split('@')[0],
+                name: decodedToken.name || decodedToken.email?.split('@')[0] || 'User',
                 email: decodedToken.email,
                 profilePicture: decodedToken.picture || '',
               });

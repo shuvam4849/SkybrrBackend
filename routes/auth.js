@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const admin = require('firebase-admin');
-const jwt = require('jsonwebtoken'); // IMPORTANT: Add this
+const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const firebaseAdmin = require('../config/firebase-admin'); // ✅ USE SHARED MODULE
 
 // ============================================
 // UPDATED: FETCH USER DATA FROM FIRESTORE (ROOT-LEVEL FIELDS)
@@ -11,12 +11,13 @@ const fetchUserFromFirestore = async (firebaseUid) => {
   try {
     console.log('🔥 Fetching user data from Firestore for:', firebaseUid);
     
-    if (!admin.apps.length) {
-      console.log('❌ Firebase Admin not initialized');
+    // ✅ Use shared Firebase module
+    const firestore = firebaseAdmin.getFirestore();
+    if (!firestore) {
+      console.log('❌ Firebase Firestore not available');
       return null;
     }
     
-    const firestore = admin.firestore();
     const userDoc = await firestore.collection('users').doc(firebaseUid).get();
     
     if (!userDoc.exists) {
@@ -160,15 +161,20 @@ return {
   }
 };
 
-// Add to your backend auth routes (auth.js)
 router.post('/resync-all-users', async (req, res) => {
   try {
     console.log('🔄 Force resyncing all users from Firestore...');
     
-    // 1. Get all users from Firestore
-    const firestore = admin.firestore();
-    const usersSnapshot = await firestore.collection('users').get();
+    // ✅ Use shared Firebase module
+    const firestore = firebaseAdmin.getFirestore();
+    if (!firestore) {
+      return res.status(500).json({
+        success: false,
+        message: 'Firebase Firestore not available'
+      });
+    }
     
+    const usersSnapshot = await firestore.collection('users').get();
     console.log(`📊 Found ${usersSnapshot.size} users in Firestore`);
     
     let syncedCount = 0;

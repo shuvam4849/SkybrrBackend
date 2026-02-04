@@ -79,6 +79,13 @@ app.delete('/api/user/:firebaseUid', async (req, res) => {
 // Helper function to clean up user-related data
 async function cleanupUserData(firebaseUid) {
   try {
+    // ✅ Lazy initialization
+    const admin = require('firebase-admin');
+    if (!admin.apps.length) {
+      console.log('❌ Firebase not initialized for cleanupUserData');
+      return;
+    }
+    
     const firestore = admin.firestore();
     
     // Delete user's chats
@@ -119,11 +126,19 @@ async function syncNewUserToBackend(firebaseUid) {
   try {
     console.log(`🔄 Auto-syncing new user: ${firebaseUid}`);
     
+    // ✅ Lazy initialization
+    const admin = require('firebase-admin');
+    if (!admin.apps.length) {
+      console.log('❌ Firebase not initialized for syncNewUserToBackend');
+      return;
+    }
+    
+    const firestore = admin.firestore();
+    
     // Wait for Firestore document to be created
     await new Promise(resolve => setTimeout(resolve, 3000));
     
     // Get user data from Firestore
-    const firestore = admin.firestore();
     const userDoc = await firestore.collection('users').doc(firebaseUid).get();
     
     if (userDoc.exists) {
@@ -166,8 +181,17 @@ async function periodicSyncCheck() {
   try {
     const User = require('./models/User');
     
+    // ✅ Lazy initialization
+    const admin = require('firebase-admin');
+    if (!admin.apps.length) {
+      console.log('❌ Firebase not initialized for periodicSyncCheck');
+      return;
+    }
+    
+    const auth = admin.auth();
+    
     // Get all Firebase users
-    const firebaseUsers = await admin.auth().listUsers();
+    const firebaseUsers = await auth.listUsers();
     const firebaseUids = firebaseUsers.users.map(u => u.uid);
     
     // Get all MongoDB users
@@ -244,10 +268,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Add middleware to pass io to ALL requests
+// ✅ Add middleware to pass Firebase to ALL requests
 app.use((req, res, next) => {
   req.io = io;
-  req.firebaseAdmin = admin;
+  // ✅ Pass the shared Firebase module instead of raw admin
+  const firebaseAdmin = require('./config/firebase-admin');
+  req.firebaseAdmin = firebaseAdmin;
   next();
 });
 
