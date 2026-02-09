@@ -331,7 +331,7 @@ if (io) {
     }
   });
   
-  io.to(chatId).emit('message received', socketMessage);
+  io.to(chatId).emit('messageReceived', socketMessage);
 }
 
     res.status(201).json({
@@ -537,7 +537,7 @@ router.post('/share-post', firebaseProtect, async (req, res) => {
     hasImage: !!socketMessage.image
   });
 
-  io.to(chatId.toString()).emit('message received', socketMessage);
+  io.to(chatId.toString()).emit('messageReceived', socketMessage);
   
   // Also emit for backward compatibility
   io.to(chatId.toString()).emit('new_message', socketMessage);

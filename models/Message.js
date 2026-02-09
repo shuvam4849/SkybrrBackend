@@ -45,14 +45,13 @@ const messageSchema = new mongoose.Schema({
     enum: ['text', 'image', 'video', 'audio', 'file', 'grouped_media', 'post_share']
   },
   
-  // ✅ UPDATED: Add 'post_share' to messageType enum
   messageType: {
     type: String,
     enum: ['text', 'image', 'video', 'audio', 'file', 'grouped_media', 'post_share'],
     default: 'text'
   },
   
-  // ✅ FIXED: Single postShare schema with proper structure
+  // ✅ FIXED: Single postShare schema
   postShare: {
     postId: {
       type: String,
@@ -62,19 +61,18 @@ const messageSchema = new mongoose.Schema({
     postImage: String,
     postVideo: String,
     postMedia: [{
-      // Use Map or Mixed for flexibility
       type: Map,
       of: mongoose.Schema.Types.Mixed
     }],
     postAuthor: {
       id: {
-        type: String, // ✅ Change from ObjectId to String to allow Firebase UIDs
+        type: String,
         required: function() { return this.messageType === 'post_share'; }
       },
       name: String,
       avatar: String
     },
-    sharedText: String, // Optional text added when sharing
+    sharedText: String,
     originalPostUrl: String,
     timestamp: {
       type: Date,
@@ -88,28 +86,28 @@ const messageSchema = new mongoose.Schema({
   fileName: {
     type: String
   },
-  // ✅ FIXED: SINGLE media object (for backward compatibility)
- // To this (add [] to make it an array):
-media: [{  // ✅ Add brackets to make it an array
-  url: String,
-  thumbnailUrl: String,
-  mimeType: String,
-  fileName: String,
-  fileSize: Number,
-  duration: Number,
-  width: Number,
-  height: Number,
-  uploadId: String,
-  uploadedAt: Date
-}],
+  
+  // Media array for single media items
+  media: [{
+    url: String,
+    thumbnailUrl: String,
+    mimeType: String,
+    fileName: String,
+    fileSize: Number,
+    duration: Number,
+    width: Number,
+    height: Number,
+    uploadId: String,
+    uploadedAt: Date
+  }],
 
-  // ✅ FIXED: MEDIA_ARRAY for grouped media
+  // Media array for grouped media
   mediaArray: [{
-  uri: String,
-  url: String,
-  originalUrl: String,
-  fileUrl: String,
-  thumbnailUrl: String,           // ← Must be 'url' not 'uri' or 'fileUrl'
+    uri: String,
+    url: String,
+    originalUrl: String,
+    fileUrl: String,
+    thumbnailUrl: String,
     type: {
       type: String,
       enum: ['image', 'video', 'audio', 'file'],
@@ -121,7 +119,6 @@ media: [{  // ✅ Add brackets to make it an array
       type: String,
       default: 'application/octet-stream'
     },
-    thumbnailUrl: String,
     duration: Number,
     width: Number,
     height: Number,
@@ -133,43 +130,63 @@ media: [{  // ✅ Add brackets to make it an array
     }
   }],
   
-  // Update groupedMedia schema:
-groupedMedia: [{
-  // ✅ ADD all possible URL fields
-  uri: String,           // For compatibility with frontend
-  url: String,           // Original high-res URL
-  originalUrl: String,   // Explicit original URL
-  fileUrl: String,       // Alternative name for original
-  thumbnailUrl: String,  // Thumbnail URL
+  // Grouped media
+  groupedMedia: [{
+    uri: String,
+    url: String,
+    originalUrl: String,
+    fileUrl: String,
+    thumbnailUrl: String,
+    type: {
+      type: String,
+      enum: ['image', 'video', 'audio', 'file'],
+      required: true
+    },
+    fileName: String,
+    fileSize: Number,
+    mimeType: {
+      type: String,
+      default: 'application/octet-stream'
+    },
+    duration: Number,
+    width: Number,
+    height: Number,
+    caption: String,
+    uploadedAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   
-  // Rest of fields...
-  type: {
-    type: String,
-    enum: ['image', 'video', 'audio', 'file'],
-    required: true
-  },
-  fileName: String,
-  fileSize: Number,
-  mimeType: {
-    type: String,
-    default: 'application/octet-stream'
-  },
-  duration: Number,
-  width: Number,
-  height: Number,
-  caption: String,
-  uploadedAt: {
-    type: Date,
-    default: Date.now
-  }
-}],
-  
-  // ✅ ADDED: Generic metadata field for additional data
+  // ✅ FIXED: Change from Map to Mixed for better compatibility
   metadata: {
-    type: Map,
-    of: mongoose.Schema.Types.Mixed,
+    type: mongoose.Schema.Types.Mixed,  // ← CHANGED FROM Map TO Mixed
     default: {}
+  },
+  
+  // ✅ ADDED: Optimistic ID tracking (for matching)
+  optimisticId: {
+    type: String,
+    index: true
+  },
+  
+  // ✅ ADDED: Upload tracking fields
+  uploadId: {
+    type: String,
+    index: true
+  },
+  
+  batchId: {
+    type: String,
+    index: true
+  },
+  
+  // ✅ ADDED: Track if this is a server confirmation of optimistic message
+  isServerConfirmation: {
+    type: Boolean,
+    default: false
   }
+  
 }, {
   timestamps: true
 });
@@ -180,9 +197,12 @@ messageSchema.index({ sender: 1 });
 messageSchema.index({ status: 1 });
 messageSchema.index({ 'media.uploadId': 1 });
 messageSchema.index({ 'groupedMedia.uri': 1 });
-// ✅ ADDED: Index for post share queries
 messageSchema.index({ 'postShare.postId': 1 });
 messageSchema.index({ 'postShare.postAuthor.id': 1 });
+// ✅ ADDED: Indexes for optimistic tracking
+messageSchema.index({ optimisticId: 1 });
+messageSchema.index({ uploadId: 1 });
+messageSchema.index({ batchId: 1 });
 
 // Helper method to check if message is a post share
 messageSchema.methods.isPostShare = function() {
@@ -207,9 +227,41 @@ messageSchema.methods.getPostShareData = function() {
   };
 };
 
+// ✅ NEW: Helper method to check if message has metadata
+messageSchema.methods.hasMetadata = function() {
+  return this.metadata && Object.keys(this.metadata).length > 0;
+};
+
+// ✅ NEW: Helper method to get upload ID from metadata
+messageSchema.methods.getUploadId = function() {
+  return this.uploadId || (this.metadata && this.metadata.uploadId);
+};
+
+// ✅ NEW: Helper method to get optimistic ID from metadata
+messageSchema.methods.getOptimisticId = function() {
+  return this.optimisticId || (this.metadata && this.metadata.tempMessageId);
+};
+
+// ✅ NEW: Helper method to check if this message matches an optimistic message
+messageSchema.methods.matchesOptimistic = function(optimisticId, uploadId) {
+  // Check direct optimistic ID match
+  if (this.optimisticId === optimisticId) return true;
+  
+  // Check upload ID match
+  if (uploadId && this.getUploadId() === uploadId) return true;
+  
+  // Check metadata match
+  if (this.metadata) {
+    if (this.metadata.tempMessageId === optimisticId) return true;
+    if (this.metadata.uploadId === uploadId) return true;
+  }
+  
+  return false;
+};
+
 // Helper method to check if message has media
 messageSchema.methods.hasMedia = function() {
-  return (this.media && this.media.fileUrl) || 
+  return (this.media && this.media.length > 0) || 
          (this.groupedMedia && this.groupedMedia.length > 0) ||
          (this.isPostShare() && this.postShare.postImage);
 };
@@ -219,9 +271,12 @@ messageSchema.methods.getMediaType = function() {
   if (this.messageType === 'grouped_media') return 'grouped_media';
   if (this.messageType === 'post_share') return 'post_share';
   
-  if (!this.media || !this.media.mimeType) return null;
+  if (!this.media || this.media.length === 0) return null;
   
-  const mime = this.media.mimeType;
+  const firstMedia = this.media[0];
+  if (!firstMedia.mimeType) return null;
+  
+  const mime = firstMedia.mimeType;
   if (mime.startsWith('image/')) return 'image';
   if (mime.startsWith('video/')) return 'video';
   if (mime.startsWith('audio/')) return 'audio';
@@ -233,6 +288,54 @@ messageSchema.methods.hasGroupedMedia = function() {
   return this.messageType === 'grouped_media' && 
          this.groupedMedia && 
          this.groupedMedia.length > 0;
+};
+
+// ✅ NEW: Static method to find message by optimistic ID
+messageSchema.statics.findByOptimisticId = function(optimisticId) {
+  return this.findOne({
+    $or: [
+      { optimisticId: optimisticId },
+      { 'metadata.tempMessageId': optimisticId }
+    ]
+  });
+};
+
+// ✅ NEW: Static method to find message by upload ID
+messageSchema.statics.findByUploadId = function(uploadId) {
+  return this.findOne({
+    $or: [
+      { uploadId: uploadId },
+      { 'metadata.uploadId': uploadId }
+    ]
+  });
+};
+
+// ✅ NEW: Static method to create a message with optimistic tracking
+messageSchema.statics.createWithOptimisticTracking = async function(data) {
+  const {
+    optimisticId,
+    uploadId,
+    batchId,
+    metadata,
+    ...messageData
+  } = data;
+  
+  // Create message with tracking fields
+  const message = new this({
+    ...messageData,
+    optimisticId: optimisticId,
+    uploadId: uploadId,
+    batchId: batchId,
+    metadata: {
+      ...metadata,
+      tempMessageId: optimisticId,
+      uploadId: uploadId,
+      batchId: batchId,
+      isOptimistic: !!optimisticId
+    }
+  });
+  
+  return message.save();
 };
 
 // Static method to find post share messages
@@ -270,7 +373,8 @@ messageSchema.statics.createPostShare = async function(data) {
     postMedia = [],
     postAuthor,
     sharedText = '',
-    originalPostUrl = ''
+    originalPostUrl = '',
+    metadata = {}
   } = data;
   
   if (!sender || !chat || !postId) {
@@ -292,7 +396,8 @@ messageSchema.statics.createPostShare = async function(data) {
       sharedText,
       originalPostUrl,
       timestamp: new Date()
-    }
+    },
+    metadata: metadata // ✅ Include metadata
   });
   
   return postShareMessage.save();
@@ -325,22 +430,25 @@ messageSchema.virtual('formattedStatus').get(function() {
   }
 });
 
-// Virtual for getting all media URLs (including post share image)
+// Virtual for getting all media URLs
 messageSchema.virtual('allMediaUrls').get(function() {
   const urls = [];
   
-  // Add single media URL if exists
-  if (this.media && this.media.fileUrl) {
-    urls.push({
-      uri: this.media.fileUrl,
-      type: this.getMediaType(),
-      fileName: this.media.fileName,
-      fileSize: this.media.fileSize,
-      mimeType: this.media.mimeType,
-      thumbnailUrl: this.media.thumbnailUrl,
-      duration: this.media.duration,
-      width: this.media.width,
-      height: this.media.height
+  // Add single media URLs
+  if (this.media && this.media.length > 0) {
+    this.media.forEach(media => {
+      urls.push({
+        uri: media.url,
+        type: this.getMediaType(),
+        fileName: media.fileName,
+        fileSize: media.fileSize,
+        mimeType: media.mimeType,
+        thumbnailUrl: media.thumbnailUrl,
+        duration: media.duration,
+        width: media.width,
+        height: media.height,
+        uploadId: media.uploadId
+      });
     });
   }
   
@@ -348,7 +456,7 @@ messageSchema.virtual('allMediaUrls').get(function() {
   if (this.groupedMedia && this.groupedMedia.length > 0) {
     this.groupedMedia.forEach(media => {
       urls.push({
-        uri: media.uri,
+        uri: media.uri || media.fileUrl || media.url,
         type: media.type,
         fileName: media.fileName,
         fileSize: media.fileSize,
@@ -362,7 +470,7 @@ messageSchema.virtual('allMediaUrls').get(function() {
     });
   }
   
-  // Add post share image if exists
+  // Add post share image
   if (this.isPostShare() && this.postShare.postImage) {
     urls.push({
       uri: this.postShare.postImage,
@@ -376,8 +484,33 @@ messageSchema.virtual('allMediaUrls').get(function() {
   return urls;
 });
 
+// Virtual for checking if message is from optimistic upload
+messageSchema.virtual('isFromOptimisticUpload').get(function() {
+  return !!this.optimisticId || 
+         !!this.uploadId || 
+         (this.metadata && this.metadata.isOptimistic);
+});
+
 // Ensure virtual fields are included
-messageSchema.set('toJSON', { virtuals: true });
-messageSchema.set('toObject', { virtuals: true });
+messageSchema.set('toJSON', { 
+  virtuals: true,
+  transform: function(doc, ret) {
+    // Ensure metadata is always an object, not a Map
+    if (ret.metadata && ret.metadata instanceof Map) {
+      ret.metadata = Object.fromEntries(ret.metadata);
+    }
+    return ret;
+  }
+});
+
+messageSchema.set('toObject', { 
+  virtuals: true,
+  transform: function(doc, ret) {
+    if (ret.metadata && ret.metadata instanceof Map) {
+      ret.metadata = Object.fromEntries(ret.metadata);
+    }
+    return ret;
+  }
+});
 
 module.exports = mongoose.model('Message', messageSchema);

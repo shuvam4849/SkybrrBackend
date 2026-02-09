@@ -1,4 +1,4 @@
-// backend/routes/upload.js - COMPLETE WITH REAL PROGRESS TRACKING
+// backend/routes/upload.js - CORRECTED VERSION
 const express = require('express');
 const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
@@ -6,9 +6,8 @@ const { initializeApp } = require('firebase/app');
 const { 
   getStorage, 
   ref, 
-  uploadBytesResumable,  // ✅ CHANGED for progress tracking
-  getDownloadURL,
-  uploadBytes 
+  uploadBytesResumable,
+  getDownloadURL
 } = require('firebase/storage');
 const sharp = require('sharp');
 const path = require('path');
@@ -83,22 +82,20 @@ const upload = multer({
     if (allowedTypes[file.mimetype]) {
       cb(null, true);
     } else {
-      cb(new Error(`Invalid file type: ${file.mimetype}. Allowed: images, videos, audio, PDF`), false);
+      cb(new Error(`Invalid file type: ${file.mimetype}`), false);
     }
   }
 });
 
 // ==================== PROGRESS TRACKING STORE ====================
-// Store upload progress in memory (for polling)
 const uploadProgressStore = new Map();
 
-// Clean up old progress entries every hour
+// Clean up old progress entries
 setInterval(() => {
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
   for (const [uploadId, data] of uploadProgressStore.entries()) {
     if (data.timestamp < oneHourAgo) {
       uploadProgressStore.delete(uploadId);
-      console.log(`🧹 Cleaned up old progress: ${uploadId}`);
     }
   }
 }, 60 * 60 * 1000);
@@ -114,11 +111,11 @@ const generateThumbnail = async (imageBuffer, fileName) => {
     const thumbnailName = `thumbnails/${Date.now()}-${Math.random().toString(36).substring(7)}.jpg`;
     const thumbnailRef = ref(storage, thumbnailName);
     
-    await uploadBytes(thumbnailRef, thumbnailBuffer, {
+    const snapshot = await uploadBytesResumable(thumbnailRef, thumbnailBuffer, {
       contentType: 'image/jpeg',
     });
     
-    const thumbnailUrl = await getDownloadURL(thumbnailRef);
+    const thumbnailUrl = await getDownloadURL(snapshot.ref);
     return thumbnailUrl;
   } catch (error) {
     console.warn('⚠️ Thumbnail generation failed:', error.message);
@@ -180,70 +177,57 @@ router.get('/health', (req, res) => {
     success: true,
     message: 'Upload service is running',
     timestamp: new Date().toISOString(),
-    firebase: !!storage,
-    maxFileSize: '50MB',
-    features: ['single-upload', 'progress-tracking', 'thumbnails']
+    firebase: !!storage
   });
 });
 
-// ✅ SINGLE FILE UPLOAD WITH REAL PROGRESS TRACKING
+// ✅ SINGLE FILE UPLOAD WITH PROGRESS TRACKING
 router.post('/media', upload.single('file'), validateUpload, async (req, res) => {
+  let clientUploadId;
+  
   try {
     const file = req.file;
-    const clientUploadId = req.body.uploadId || `upload_${Date.now()}_${uuidv4().substring(0, 8)}`;
+    clientUploadId = req.body.uploadId || `upload_${Date.now()}_${uuidv4().substring(0, 8)}`;
     const chatId = req.body.chatId || 'unknown';
     const userId = req.body.userId || req.user?.uid || 'anonymous';
     const caption = req.body.caption || '';
+    const isGrouped = req.body.isGrouped === 'true';
+    const batchId = req.body.batchId;
+    const fileIndex = req.body.fileIndex;
     
-    console.log('📤 Starting upload with progress tracking:', {
+    console.log('📤 Upload request:', {
       uploadId: clientUploadId,
       fileName: file.originalname,
-      fileSize: file.size,
+      fileSize: (file.size / 1024 / 1024).toFixed(2) + 'MB',
       chatId: chatId,
-      userId: userId
+      userId: userId,
+      isGrouped: isGrouped,
+      batchId: batchId,
+      fileIndex: fileIndex
     });
 
-    // ✅ FIX: Log the actual file buffer info
-    console.log('📊 File buffer info:', {
-      hasBuffer: !!file.buffer,
-      bufferLength: file.buffer?.length,
-      mimetype: file.mimetype
-    });
-
+    // Validate file buffer
     if (!file.buffer || file.buffer.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'File buffer is empty or invalid',
-        uploadId: clientUploadId
-      });
+      throw new Error('File buffer is empty or invalid');
     }
 
-    // Generate unique filename for Firebase
-    const fileExtension = getFileExtension(file.originalname) || 'bin';
+    // Generate unique filename
+    const fileExtension = getFileExtension(file.originalname) || 
+                         (file.mimetype.includes('image') ? 'jpg' : 'bin');
     const uniqueFileName = `messages/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExtension}`;
     const storageRef = ref(storage, uniqueFileName);
 
-    // ✅ INITIAL PROGRESS UPDATE
+    // Initialize progress tracking
     uploadProgressStore.set(clientUploadId, {
       progress: 0,
       status: 'starting',
       fileName: file.originalname,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      ...(batchId && { batchId, fileIndex })
     });
 
-    // Send initial progress via Socket.IO if available
-    if (req.io) {
-      req.io.emit('uploadProgress', {
-        uploadId: clientUploadId,
-        progress: 0,
-        status: 'starting',
-        fileName: file.originalname,
-        fileSize: file.size
-      });
-    }
-
-    return new Promise((resolve) => {
-      // ✅ USE UPLOAD BYTES RESUMABLE FOR PROGRESS TRACKING
+    // Upload with progress tracking
+    return new Promise((resolve, reject) => {
       const uploadTask = uploadBytesResumable(storageRef, file.buffer, {
         contentType: file.mimetype,
         customMetadata: {
@@ -252,11 +236,11 @@ router.post('/media', upload.single('file'), validateUpload, async (req, res) =>
           uploadId: clientUploadId,
           chatId: chatId,
           caption: caption,
+          ...(batchId && { batchId, fileIndex }),
           timestamp: new Date().toISOString()
         }
       });
 
-      // ✅ REAL-TIME PROGRESS LISTENER
       uploadTask.on('state_changed',
         // Progress snapshot
         (snapshot) => {
@@ -269,27 +253,16 @@ router.post('/media', upload.single('file'), validateUpload, async (req, res) =>
             fileName: file.originalname,
             bytesTransferred: snapshot.bytesTransferred,
             totalBytes: snapshot.totalBytes,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            ...(batchId && { batchId, fileIndex })
           });
 
-          console.log(`🔥 REAL FIREBASE PROGRESS [${clientUploadId}]: ${progress}%`);
-
-          // Send progress via Socket.IO
-          if (req.io) {
-            req.io.emit('uploadProgress', {
-              uploadId: clientUploadId,
-              progress: progress,
-              status: 'uploading',
-              fileName: file.originalname,
-              bytesTransferred: snapshot.bytesTransferred,
-              totalBytes: snapshot.totalBytes
-            });
-          }
+          console.log(`📊 Progress [${clientUploadId}]: ${progress}%`);
         },
         // Error handler
         (error) => {
-          console.error(`❌ Upload failed [${clientUploadId}]:`, error);
-
+          console.error(`❌ Upload failed [${clientUploadId}]:`, error.message);
+          
           uploadProgressStore.set(clientUploadId, {
             progress: 0,
             status: 'error',
@@ -297,23 +270,8 @@ router.post('/media', upload.single('file'), validateUpload, async (req, res) =>
             error: error.message,
             timestamp: Date.now()
           });
-
-          if (req.io) {
-            req.io.emit('uploadProgress', {
-              uploadId: clientUploadId,
-              progress: 0,
-              status: 'error',
-              fileName: file.originalname,
-              error: error.message
-            });
-          }
-
-          res.status(500).json({
-            success: false,
-            message: 'Upload failed: ' + error.message,
-            uploadId: clientUploadId
-          });
-          resolve();
+          
+          reject(error);
         },
         // Completion handler
         async () => {
@@ -334,28 +292,18 @@ router.post('/media', upload.single('file'), validateUpload, async (req, res) =>
               dimensions = await getImageDimensions(file.buffer);
             }
 
-            // Mark as complete in progress store
+            // Mark as complete
             uploadProgressStore.set(clientUploadId, {
               progress: 100,
               status: 'complete',
               fileName: file.originalname,
               fileUrl: downloadURL,
-              timestamp: Date.now()
+              timestamp: Date.now(),
+              ...(batchId && { batchId, fileIndex })
             });
 
-            // Send completion via Socket.IO
-            if (req.io) {
-              req.io.emit('uploadProgress', {
-                uploadId: clientUploadId,
-                progress: 100,
-                status: 'complete',
-                fileName: file.originalname,
-                fileUrl: downloadURL
-              });
-            }
-
-            // Response
-            res.json({
+            // Build response
+            const responseData = {
               success: true,
               data: {
                 // Basic info
@@ -375,48 +323,41 @@ router.post('/media', upload.single('file'), validateUpload, async (req, res) =>
                 caption: caption,
                 uploadedAt: new Date().toISOString(),
                 
-                // Grouped media format
-                formattedForGroupedMedia: {
-                  uri: downloadURL,
-                  url: downloadURL,
-                  type: fileType,
-                  fileName: file.originalname,
-                  fileSize: file.size,
-                  mimeType: file.mimetype,
-                  thumbnailUrl: thumbnailUrl,
-                  width: dimensions.width,
-                  height: dimensions.height,
-                  caption: caption,
-                  uploadedAt: new Date().toISOString()
-                }
+                // For grouped media
+                ...(batchId && { 
+                  batchId: batchId,
+                  fileIndex: parseInt(fileIndex) || 0
+                })
               }
-            });
-            
+            };
+
+            res.json(responseData);
             resolve();
           } catch (error) {
             console.error(`❌ Post-upload processing failed [${clientUploadId}]:`, error);
-            
-            res.status(500).json({
-              success: false,
-              message: 'Upload completed but processing failed: ' + error.message,
-              uploadId: clientUploadId
-            });
-            resolve();
+            reject(error);
           }
         }
       );
+    }).catch(error => {
+      res.status(500).json({
+        success: false,
+        message: 'Upload failed: ' + error.message,
+        uploadId: clientUploadId
+      });
     });
 
   } catch (error) {
-    console.error('❌ Upload route error:', error);
+    console.error('❌ Upload route error:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Upload failed: ' + error.message
+      message: 'Upload failed: ' + error.message,
+      ...(clientUploadId && { uploadId: clientUploadId })
     });
   }
 });
 
-// ✅ PROGRESS POLLING ENDPOINT (For clients without WebSocket)
+// ✅ PROGRESS POLLING ENDPOINT
 router.get('/progress/:uploadId', (req, res) => {
   const { uploadId } = req.params;
   
@@ -429,11 +370,6 @@ router.get('/progress/:uploadId', (req, res) => {
   
   const progressData = uploadProgressStore.get(uploadId);
   
-  // Clean up completed uploads older than 5 minutes
-  if (progressData.status === 'complete' && Date.now() - progressData.timestamp > 5 * 60 * 1000) {
-    uploadProgressStore.delete(uploadId);
-  }
-  
   res.json({
     success: true,
     uploadId: uploadId,
@@ -441,54 +377,58 @@ router.get('/progress/:uploadId', (req, res) => {
     status: progressData.status,
     fileName: progressData.fileName,
     ...(progressData.fileUrl && { fileUrl: progressData.fileUrl }),
-    ...(progressData.error && { error: progressData.error })
+    ...(progressData.error && { error: progressData.error }),
+    ...(progressData.batchId && { 
+      batchId: progressData.batchId,
+      fileIndex: progressData.fileIndex
+    })
   });
 });
 
-// ✅ BATCH PROGRESS ENDPOINT
+// ✅ BATCH PROGRESS ENDPOINT (for grouped media)
 router.get('/progress/batch/:batchId', (req, res) => {
   const { batchId } = req.params;
   
-  // Check if batch exists
-  const batchData = uploadProgressStore.get(batchId);
-  if (!batchData) {
-    return res.status(404).json({
-      success: false,
-      message: 'Batch not found or expired'
-    });
-  }
-  
-  // Get all individual file progress for this batch
+  // Collect all files for this batch
   const fileProgress = [];
-  for (let i = 0; i < (batchData.totalFiles || 0); i++) {
-    const fileUploadId = `${batchId}_file_${i}`;
-    const fileData = uploadProgressStore.get(fileUploadId);
-    if (fileData) {
+  let totalProgress = 0;
+  let fileCount = 0;
+  let completedFiles = 0;
+  
+  // Find all uploads for this batch
+  for (const [uploadId, data] of uploadProgressStore.entries()) {
+    if (data.batchId === batchId) {
       fileProgress.push({
-        fileIndex: i,
-        uploadId: fileUploadId,
-        progress: fileData.progress,
-        status: fileData.status,
-        fileName: fileData.fileName,
-        ...(fileData.fileUrl && { fileUrl: fileData.fileUrl })
+        uploadId: uploadId,
+        progress: data.progress || 0,
+        status: data.status,
+        fileName: data.fileName,
+        fileIndex: data.fileIndex,
+        ...(data.fileUrl && { fileUrl: data.fileUrl })
       });
+      
+      totalProgress += data.progress || 0;
+      fileCount++;
+      if (data.progress >= 100) completedFiles++;
     }
   }
   
-  // Calculate overall progress
-  const totalProgress = fileProgress.reduce((sum, file) => sum + (file.progress || 0), 0);
-  const avgProgress = fileProgress.length > 0 ? Math.round(totalProgress / fileProgress.length) : 0;
-  const completedFiles = fileProgress.filter(f => f.progress >= 100).length;
+  if (fileCount === 0) {
+    return res.status(404).json({
+      success: false,
+      message: 'Batch not found or no files uploaded'
+    });
+  }
+  
+  const avgProgress = Math.round(totalProgress / fileCount);
   
   res.json({
     success: true,
     batchId: batchId,
     progress: avgProgress,
-    status: batchData.status,
-    totalFiles: batchData.totalFiles,
+    totalFiles: fileCount,
     completedFiles: completedFiles,
-    fileProgress: fileProgress,
-    timestamp: batchData.timestamp
+    fileProgress: fileProgress
   });
 });
 
@@ -497,21 +437,19 @@ router.delete('/progress/:uploadId', (req, res) => {
   const { uploadId } = req.params;
   
   if (uploadProgressStore.delete(uploadId)) {
-    console.log(`🧹 Cleared progress data for: ${uploadId}`);
     res.json({ success: true, message: 'Progress data cleared' });
   } else {
     res.status(404).json({ success: false, message: 'Upload not found' });
   }
 });
 
-// ✅ BATCH UPLOAD FOR GROUPED MEDIA WITH INDIVIDUAL FILE PROGRESS TRACKING
+// ✅ BATCH UPLOAD ENDPOINT (Simplified)
 router.post('/media/batch', upload.array('files', 10), async (req, res) => {
   try {
     const files = req.files || [];
     const batchId = req.body.batchId || `batch_${Date.now()}_${uuidv4().substring(0, 8)}`;
     const chatId = req.body.chatId || 'unknown';
     const userId = req.body.userId || req.user?.uid || 'anonymous';
-    const captions = JSON.parse(req.body.captions || '[]');
     
     if (files.length === 0) {
       return res.status(400).json({
@@ -520,9 +458,11 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
       });
     }
     
-    console.log(`📤📦 Batch upload started: ${files.length} files`, { batchId, chatId });
+    console.log(`📤 Batch upload started: ${files.length} files`, { batchId });
 
-    // ✅ Store BATCH progress (overall)
+    const uploadResults = [];
+    
+    // Store batch info
     uploadProgressStore.set(batchId, {
       progress: 0,
       status: 'starting',
@@ -531,57 +471,40 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
       timestamp: Date.now()
     });
 
-    // ✅ Send initial batch progress
-    if (req.io) {
-      req.io.emit('batchUploadProgress', {
-        batchId: batchId,
-        progress: 0,
-        status: 'starting',
-        totalFiles: files.length,
-        completedFiles: 0
-      });
-    }
-
-    const uploadResults = [];
-    
-    // ✅ Upload files SEQUENTIALLY with real progress tracking
+    // Upload files sequentially
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const fileCaption = captions[i] || '';
-      const fileUploadId = `${batchId}_file_${i}`;
+      const fileUploadId = `${batchId}_${i}`; // ✅ Match frontend format
       
-      console.log(`📤 [${i + 1}/${files.length}] Starting upload: ${file.originalname}`);
+      console.log(`📤 [${i + 1}/${files.length}] Starting: ${file.originalname}`);
       
-      // ✅ Set initial progress for THIS individual file
-      uploadProgressStore.set(fileUploadId, {
-        progress: 0,
-        status: 'starting',
-        fileName: file.originalname,
-        batchId: batchId,
-        fileIndex: i,
-        timestamp: Date.now()
-      });
-      
-      // ✅ Send initial progress for THIS file
-      if (req.io) {
-        req.io.emit('uploadProgress', {
-          uploadId: fileUploadId,
-          progress: 0,
-          status: 'starting',
-          fileName: file.originalname,
-          batchId: batchId,
-          fileIndex: i,
-          isGrouped: true
-        });
-      }
-
       try {
-        // Generate unique filename
+        // Create a mock request for the single upload endpoint
+        const mockReq = {
+          file: file,
+          body: {
+            uploadId: fileUploadId,
+            chatId: chatId,
+            userId: userId,
+            isGrouped: 'true',
+            batchId: batchId,
+            fileIndex: i.toString()
+          }
+        };
+        
+        const mockRes = {
+          json: (data) => {
+            if (data.success) {
+              uploadResults.push(data.data);
+            }
+          }
+        };
+        
+        // Use the same upload logic
         const fileExtension = getFileExtension(file.originalname) || 'bin';
         const uniqueFileName = `messages/${Date.now()}-${i}-${Math.random().toString(36).substring(7)}.${fileExtension}`;
         const storageRef = ref(storage, uniqueFileName);
-
-        // ✅ USE UPLOAD BYTES RESUMABLE FOR REAL PROGRESS TRACKING
+        
         await new Promise((resolve, reject) => {
           const uploadTask = uploadBytesResumable(storageRef, file.buffer, {
             contentType: file.mimetype,
@@ -590,115 +513,33 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
               uploadedBy: userId,
               batchId: batchId,
               fileIndex: i.toString(),
-              caption: fileCaption,
               chatId: chatId
             }
           });
 
-          // ✅ REAL-TIME PROGRESS LISTENER FOR EACH FILE
           uploadTask.on('state_changed',
             (snapshot) => {
               const progress = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
-              
-              // ✅ Update INDIVIDUAL file progress
               uploadProgressStore.set(fileUploadId, {
                 progress: progress,
                 status: 'uploading',
                 fileName: file.originalname,
-                bytesTransferred: snapshot.bytesTransferred,
-                totalBytes: snapshot.totalBytes,
                 batchId: batchId,
                 fileIndex: i,
                 timestamp: Date.now()
               });
-
-              console.log(`🔥 FILE ${i} REAL PROGRESS [${fileUploadId}]: ${progress}%`);
-
-              // ✅ Send INDIVIDUAL file progress via Socket.IO
-              if (req.io) {
-                req.io.emit('uploadProgress', {
-                  uploadId: fileUploadId,
-                  progress: progress,
-                  status: 'uploading',
-                  fileName: file.originalname,
-                  batchId: batchId,
-                  fileIndex: i,
-                  isGrouped: true,
-                  bytesTransferred: snapshot.bytesTransferred,
-                  totalBytes: snapshot.totalBytes
-                });
-              }
-
-              // ✅ Calculate and update BATCH progress
-              const batchData = uploadProgressStore.get(batchId);
-              if (batchData) {
-                // Calculate overall progress based on all files
-                let totalProgress = 0;
-                let completedCount = 0;
-                
-                for (let j = 0; j < files.length; j++) {
-                  const fid = `${batchId}_file_${j}`;
-                  const fileData = uploadProgressStore.get(fid);
-                  if (fileData) {
-                    totalProgress += fileData.progress || 0;
-                    if (fileData.progress >= 100) completedCount++;
-                  }
-                }
-                
-                const avgProgress = Math.round(totalProgress / files.length);
-                
-                // Update batch progress
-                uploadProgressStore.set(batchId, {
-                  progress: avgProgress,
-                  status: 'uploading',
-                  totalFiles: files.length,
-                  completedFiles: completedCount,
-                  timestamp: Date.now()
-                });
-
-                // Send batch progress
-                if (req.io) {
-                  req.io.emit('batchUploadProgress', {
-                    batchId: batchId,
-                    progress: avgProgress,
-                    status: 'uploading',
-                    totalFiles: files.length,
-                    completedFiles: completedCount,
-                    currentFile: i + 1
-                  });
-                }
-              }
             },
-            (error) => {
-              console.error(`❌ File ${i + 1} upload failed:`, error);
-              
-              uploadProgressStore.set(fileUploadId, {
-                progress: 0,
-                status: 'error',
-                fileName: file.originalname,
-                error: error.message,
-                batchId: batchId,
-                fileIndex: i,
-                timestamp: Date.now()
-              });
-              
-              reject(error);
-            },
+            (error) => reject(error),
             async () => {
               try {
-                // Get download URL
                 const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
-                
-                // Determine file type
                 const fileType = getFileType(file.mimetype, file.originalname);
-                
-                // Generate thumbnail for images
                 let thumbnailUrl = null;
+                
                 if (fileType === 'image') {
                   thumbnailUrl = await generateThumbnail(file.buffer, file.originalname);
                 }
                 
-                // ✅ Mark file as complete
                 uploadProgressStore.set(fileUploadId, {
                   progress: 100,
                   status: 'complete',
@@ -710,22 +551,6 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
                   timestamp: Date.now()
                 });
                 
-                // ✅ Send completion for THIS file
-                if (req.io) {
-                  req.io.emit('uploadProgress', {
-                    uploadId: fileUploadId,
-                    progress: 100,
-                    status: 'complete',
-                    fileName: file.originalname,
-                    fileUrl: downloadURL,
-                    thumbnailUrl: thumbnailUrl,
-                    batchId: batchId,
-                    fileIndex: i,
-                    isGrouped: true
-                  });
-                }
-                
-                // Add to results
                 uploadResults.push({
                   uri: downloadURL,
                   url: downloadURL,
@@ -734,13 +559,10 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
                   fileSize: file.size,
                   mimeType: file.mimetype,
                   thumbnailUrl: thumbnailUrl,
-                  caption: fileCaption,
-                  uploadedAt: new Date().toISOString(),
-                  success: true,
-                  uploadId: fileUploadId
+                  uploadId: fileUploadId,
+                  batchId: batchId,
+                  fileIndex: i
                 });
-                
-                console.log(`✅ File ${i + 1} uploaded successfully: ${downloadURL.substring(0, 50)}...`);
                 
                 resolve();
               } catch (error) {
@@ -751,18 +573,7 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
         });
         
       } catch (error) {
-        console.error(`❌ Failed to upload file ${i + 1}:`, error.message);
-        
-        uploadProgressStore.set(fileUploadId, {
-          progress: 0,
-          status: 'error',
-          fileName: file.originalname,
-          error: error.message,
-          batchId: batchId,
-          fileIndex: i,
-          timestamp: Date.now()
-        });
-        
+        console.error(`❌ File ${i + 1} upload failed:`, error.message);
         uploadResults.push({
           fileName: file.originalname,
           success: false,
@@ -771,11 +582,21 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
         });
       }
       
-      // Small delay between files
+      // Update batch progress
+      const completed = uploadResults.filter(r => r.success).length;
+      uploadProgressStore.set(batchId, {
+        progress: Math.round((completed / files.length) * 100),
+        status: 'uploading',
+        totalFiles: files.length,
+        completedFiles: completed,
+        timestamp: Date.now()
+      });
+      
+      // Small delay
       await new Promise(resolve => setTimeout(resolve, 300));
     }
     
-    // ✅ Mark batch as complete
+    // Mark batch as complete
     const successfulUploads = uploadResults.filter(r => r.success);
     
     uploadProgressStore.set(batchId, {
@@ -786,18 +607,7 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
       timestamp: Date.now()
     });
     
-    // ✅ Send final batch completion
-    if (req.io) {
-      req.io.emit('batchUploadProgress', {
-        batchId: batchId,
-        progress: 100,
-        status: 'complete',
-        totalFiles: files.length,
-        completedFiles: successfulUploads.length
-      });
-    }
-    
-    console.log(`✅ Batch upload completed: ${successfulUploads.length}/${files.length} files successful`);
+    console.log(`✅ Batch upload completed: ${successfulUploads.length}/${files.length} files`);
     
     res.json({
       success: true,
@@ -806,7 +616,6 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
         uploads: successfulUploads,
         totalCount: files.length,
         successfulCount: successfulUploads.length,
-        failedCount: uploadResults.length - successfulUploads.length,
         groupedMedia: successfulUploads
       }
     });
@@ -820,31 +629,22 @@ router.post('/media/batch', upload.array('files', 10), async (req, res) => {
   }
 });
 
-// ✅ TEST UPLOAD ENDPOINT
+// ✅ TEST ENDPOINT
 router.post('/test', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No test file provided'
-      });
-    }
-    
     res.json({
       success: true,
-      message: 'Test upload successful',
-      fileInfo: {
+      message: 'Test successful',
+      file: req.file ? {
         name: req.file.originalname,
         size: req.file.size,
-        mimetype: req.file.mimetype,
-        encoding: req.file.encoding
-      },
-      serverTime: new Date().toISOString()
+        type: req.file.mimetype
+      } : null
     });
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: 'Test upload failed: ' + error.message
+      message: 'Test failed: ' + error.message
     });
   }
 });

@@ -655,7 +655,7 @@ const updateUserStatus = async (firebaseUid, isOnline, source = 'unknown') => {
             };
 
             // Send to recipient
-            io.to(firebaseUid).emit('message received', formattedMessage);
+            io.to(firebaseUid).emit('messageReceived', formattedMessage);
             
             // Notify sender of delayed delivery
             const senderSockets = userSockets.get(message.sender.firebaseUid);
@@ -798,7 +798,7 @@ const updateUserStatus = async (firebaseUid, isOnline, source = 'unknown') => {
     // ✅ UPDATED: Handle new message with grouped media support
     socket.on('new message', async (newMessage) => {
       try {
-        console.log('📨 New message received via socket:', {
+        console.log('📨 New messageReceived via socket:', {
           chat: newMessage.chat,
           sender: newMessage.sender,
           content: newMessage.content,
@@ -938,7 +938,7 @@ const updateUserStatus = async (firebaseUid, isOnline, source = 'unknown') => {
           });
         } else {
           // Emit to all CONNECTED users in the chat room
-          io.to(newMessage.chat).emit('message received', formattedMessage);
+          io.to(newMessage.chat).emit('messageReceived', formattedMessage);
           
           console.log(`✅ Message sent with ${groupedMedia.length} media items to ${connectedParticipants.length} connected users`);
         }
@@ -961,6 +961,11 @@ const updateUserStatus = async (firebaseUid, isOnline, source = 'unknown') => {
       content: messageData.content?.substring(0, 50),
       messageType: messageData.messageType,
       isPost: messageData.isPost || messageData.messageType === 'post_share',
+      // ✅ ADD METADATA LOGGING
+      hasMetadata: !!messageData.metadata,
+      uploadId: messageData.metadata?.uploadId,
+      tempMessageId: messageData.metadata?.tempMessageId,
+      batchId: messageData.metadata?.batchId,
       // ✅ ADD MEDIA LOGGING
       hasMediaArray: !!messageData.media && messageData.media.length > 0,
       mediaCount: messageData.media?.length || 0,
@@ -968,7 +973,7 @@ const updateUserStatus = async (firebaseUid, isOnline, source = 'unknown') => {
       fileUrl: messageData.fileUrl?.substring(0, 50) + '...'
     });
 
-    // ✅ 1. HANDLE GROUPED MEDIA SPECIFICALLY (NEW SECTION)
+    // ✅ 1. HANDLE GROUPED MEDIA SPECIFICALLY
     if (messageData.messageType === 'grouped_media' || 
         (messageData.media?.length > 1) || 
         messageData.isGrouped) {
@@ -977,7 +982,9 @@ const updateUserStatus = async (firebaseUid, isOnline, source = 'unknown') => {
         messageType: messageData.messageType,
         mediaCount: messageData.media?.length || 0,
         isGrouped: messageData.isGrouped,
-        hasGroupedMedia: !!messageData.groupedMedia
+        hasGroupedMedia: !!messageData.groupedMedia,
+        // ✅ LOG METADATA
+        metadata: messageData.metadata
       });
 
       // Find user
@@ -996,9 +1003,9 @@ const updateUserStatus = async (firebaseUid, isOnline, source = 'unknown') => {
       
       console.log(`📊 Grouped media has ${mediaArray.length} items`);
 
-      // ✅ Format media for MongoDB (your schema expects 'uri' not 'url'!)
+      // ✅ Format media for MongoDB
       const formattedGroupedMedia = mediaArray.map((media, index) => ({
-        uri: media.url || media.uri || media.fileUrl, // ❗ Your schema uses 'uri'!
+        uri: media.url || media.uri || media.fileUrl,
         type: media.type || 'image',
         fileName: media.fileName || media.name || `File ${index + 1}`,
         fileSize: media.fileSize || media.size || 0,
@@ -1010,37 +1017,36 @@ const updateUserStatus = async (firebaseUid, isOnline, source = 'unknown') => {
         caption: media.caption || ''
       }));
 
-      console.log('✅ Formatted grouped media for MongoDB:', {
-        count: formattedGroupedMedia.length,
-        firstItemUri: formattedGroupedMedia[0]?.uri?.substring(0, 50) + '...'
-      });
+      console.log('✅ Formatted grouped media for MongoDB');
 
-      // ✅ Create message with GROUPED MEDIA (using your schema's groupedMedia field)
+      // ✅ Create message with GROUPED MEDIA and METADATA
       let message = await Message.create({
         sender: user._id,
         chat: messageData.chat,
         content: messageData.content || `Sent ${formattedGroupedMedia.length} files`,
-        messageType: 'grouped_media', // ✅ Must be 'grouped_media'
+        messageType: 'grouped_media',
         isGrouped: true,
-        groupedMedia: formattedGroupedMedia, // ✅ Store in groupedMedia field
+        groupedMedia: formattedGroupedMedia,
         // For backward compatibility
         fileUrl: formattedGroupedMedia.length > 0 ? formattedGroupedMedia[0].uri : null,
-        media: formattedGroupedMedia, // Also store in media array
+        media: formattedGroupedMedia,
+        // ✅ CRITICAL: PRESERVE METADATA FROM FRONTEND
+        metadata: messageData.metadata || {},
         status: 'sent',
         deliveredTo: [],
         readBy: []
       });
 
-      console.log('💾 Grouped media saved to MongoDB:', {
+      console.log('💾 Grouped media saved to MongoDB with metadata:', {
         _id: message._id,
         groupedMediaCount: message.groupedMedia?.length || 0,
-        mediaCount: message.media?.length || 0
+        metadata: message.metadata
       });
 
-     // In your send_message handler, around line 400, update the populate:
-message = await Message.findById(message._id)
-  .populate('sender', 'name profilePicture firebaseUid')
-  .populate('chat', 'isGroupChat users isPendingRequest isActiveChat');
+      // Populate message
+      message = await Message.findById(message._id)
+        .populate('sender', 'name profilePicture firebaseUid')
+        .populate('chat');
 
       // Update chat
       await Chat.findByIdAndUpdate(messageData.chat, {
@@ -1048,7 +1054,7 @@ message = await Message.findById(message._id)
         updatedAt: new Date()
       });
 
-      // ✅ FORMAT FOR SOCKET EMISSION
+      // ✅ FORMAT FOR SOCKET EMISSION WITH METADATA
       const formattedMessage = {
         _id: message._id,
         content: message.content,
@@ -1059,55 +1065,152 @@ message = await Message.findById(message._id)
           profilePicture: message.sender.profilePicture
         },
         chat: message.chat._id,
-        messageType: 'grouped_media', // ✅ Must be 'grouped_media'
+        messageType: 'grouped_media',
         isGrouped: true,
-        // ✅ CRITICAL: Include groupedMedia in response
-        groupedMedia: message.groupedMedia, 
-        // Also include as 'media' for frontend compatibility
+        // ✅ CRITICAL: INCLUDE GROUPED MEDIA IN RESPONSE
+        groupedMedia: message.groupedMedia,
         media: message.groupedMedia,
         // For backward compatibility
         fileUrl: message.fileUrl,
+        // ✅ CRITICAL: RETURN METADATA TO FRONTEND
+        metadata: message.metadata || messageData.metadata || {},
         status: message.status,
         createdAt: message.createdAt,
         updatedAt: message.updatedAt
       };
 
-      console.log('📡 Emitting grouped media to chat:', {
+      console.log('📡 Emitting grouped media to chat with metadata:', {
         messageId: message._id,
         groupedMediaCount: formattedMessage.groupedMedia?.length || 0,
-        hasGroupedMedia: !!formattedMessage.groupedMedia
+        metadata: formattedMessage.metadata
       });
 
-      // ✅ EMIT TO SENDER FOR CONFIRMATION
-      socket.emit('message_sent', {
-        messageId: message._id,
-        chatId: messageData.chat,
-        status: 'sent',
-        timestamp: new Date().toISOString(),
-        isGrouped: true,
-        mediaCount: formattedMessage.groupedMedia?.length || 0
-      });
+      // 🔥 ALSO send direct confirmation to sender:
+console.log('🎯 [DEBUG] EMITTING EVENT: "message_sent" to sender');
+socket.emit('message_sent', {
+  messageId: message._id,
+  chatId: messageData.chat,
+  status: 'sent',
+  metadata: formattedMessage.metadata,
+  tempMessageId: messageData.metadata?.tempMessageId,
+  batchId: messageData.metadata?.batchId,
+  timestamp: new Date().toISOString()
+});
 
-      // ✅ BROADCAST TO ALL USERS IN CHAT
-      io.to(messageData.chat).emit('message received', formattedMessage);
+      // 🔥 ADD THIS RIGHT BEFORE THE EMIT:
+console.log('🎯 [DEBUG] EMITTING EVENT: "messageReceived" to chat', messageData.chat);
+
+// THEN emit:
+io.to(messageData.chat).emit('messageReceived', formattedMessage);
+      
+      console.log(`✅ Grouped media broadcast with metadata to chat ${messageData.chat}`);
       
       return; // Exit early
     }
 
     // ✅ HANDLE POST_SHARE MESSAGES
     if (messageData.messageType === 'post_share' || messageData.isPost || messageData.type === 'post') {
-      // ... post share handling code ...
-      return; // Exit early for post_share messages
+      console.log('📱 [share_post] Processing post share:', {
+        metadata: messageData.metadata
+      });
+      
+      // Find user
+      const user = await User.findOne({ firebaseUid: messageData.sender });
+      if (!user) {
+        throw new Error(`User not found: ${messageData.sender}`);
+      }
+
+      const postData = messageData.postData || messageData;
+      
+      // Create message with metadata
+      const messageToCreate = {
+        sender: user._id,
+        chat: messageData.chat,
+        content: messageData.shareText || "Check this out!",
+        messageType: 'post',
+        isPost: true,
+        type: 'post',
+        postId: postData.id,
+        postData: postData,
+        shareText: messageData.shareText,
+        media: postData.media || [],
+        image: postData.image || postData.imageUrl || '',
+        video: postData.video || '',
+        authorName: postData.authorName,
+        authorAvatar: postData.authorAvatar,
+        // ✅ PRESERVE METADATA
+        metadata: messageData.metadata || {},
+        status: 'sent',
+        deliveredTo: [],
+        readBy: []
+      };
+
+      let message = await Message.create(messageToCreate);
+
+      message = await Message.findById(message._id)
+        .populate('sender', 'name profilePicture firebaseUid')
+        .populate('chat');
+
+      await Chat.findByIdAndUpdate(messageData.chat, {
+        latestMessage: message._id,
+        updatedAt: new Date()
+      });
+
+      // Format with metadata
+      const formattedMessage = {
+        _id: message._id,
+        content: messageData.shareText || "Check this out!",
+        sender: {
+          _id: message.sender._id,
+          firebaseUid: message.sender.firebaseUid,
+          name: message.sender.name,
+          profilePicture: message.sender.profilePicture
+        },
+        chat: message.chat._id,
+        messageType: 'post',
+        isPost: true,
+        type: 'post',
+        id: postData.id,
+        postId: postData.id,
+        postData: postData,
+        media: postData.media || [],
+        image: postData.image || postData.imageUrl || '',
+        video: postData.video || '',
+        authorId: postData.authorId,
+        authorName: postData.authorName,
+        authorAvatar: postData.authorAvatar,
+        shareText: messageData.shareText,
+        // ✅ INCLUDE METADATA
+        metadata: message.metadata || messageData.metadata || {},
+        timestamp: new Date(),
+        createdAt: message.createdAt,
+        updatedAt: message.updatedAt,
+        status: 'sent'
+      };
+
+      // Confirm to sender with metadata
+      socket.emit('message_sent', {
+        messageId: message._id,
+        chatId: messageData.chat,
+        status: 'sent',
+        metadata: formattedMessage.metadata,
+        timestamp: new Date().toISOString(),
+        isPost: true
+      });
+
+      // Broadcast with metadata
+      io.to(messageData.chat).emit('messageReceived', formattedMessage);
+      
+      return; // Exit early
     }
 
     // ✅ HANDLE MEDIA MESSAGES (IMAGES, VIDEOS, ETC.)
     if (messageData.messageType === 'image' || messageData.messageType === 'video' || 
         messageData.messageType === 'audio' || messageData.media?.length > 0) {
       
-      console.log('🖼️ Processing MEDIA message:', {
+      console.log('🖼️ Processing MEDIA message with metadata:', {
         messageType: messageData.messageType,
-        mediaCount: messageData.media?.length || 0,
-        fileUrl: messageData.fileUrl?.substring(0, 50) + '...'
+        metadata: messageData.metadata
       });
 
       // Find user
@@ -1116,11 +1219,10 @@ message = await Message.findById(message._id)
         throw new Error(`User not found: ${messageData.sender}`);
       }
 
-      // ✅ PROCESS MEDIA DATA
+      // Process media data
       let mediaArray = [];
       let fileUrl = messageData.fileUrl;
       
-      // If there's a media array, use the first item (or all for grouped media)
       if (messageData.media && messageData.media.length > 0) {
         mediaArray = messageData.media.map(media => ({
           url: media.url || media.uri || media.fileUrl,
@@ -1135,57 +1237,44 @@ message = await Message.findById(message._id)
           caption: media.caption || ''
         }));
         
-        // For backward compatibility, also set fileUrl from first media item
         if (mediaArray.length > 0 && !fileUrl) {
           fileUrl = mediaArray[0].url;
         }
-        
-        console.log(`✅ Processed ${mediaArray.length} media items`);
       }
 
-      // ✅ Create message with MEDIA data
+      // Create message with metadata
       const messageToCreate = {
         sender: user._id,
         chat: messageData.chat,
         content: messageData.content || (messageData.messageType === 'image' ? '📷' : '🎬'),
         messageType: messageData.messageType,
-        // ✅ Store media data
         fileUrl: fileUrl,
-        media: mediaArray, // ✅ Store the full media array
+        media: mediaArray,
         image: messageData.image || (messageData.messageType === 'image' ? fileUrl : undefined),
         video: messageData.video || (messageData.messageType === 'video' ? fileUrl : undefined),
-        // Store metadata
         fileName: messageData.fileName,
         fileSize: messageData.fileSize,
         mimeType: messageData.mimeType,
         thumbnailUrl: messageData.thumbnailUrl,
-        // Status
+        // ✅ PRESERVE METADATA FROM FRONTEND
+        metadata: messageData.metadata || {},
         status: 'sent',
         deliveredTo: [],
         readBy: []
       };
 
-      console.log('📝 Creating MEDIA message in MongoDB:', {
-        hasFileUrl: !!messageToCreate.fileUrl,
-        hasMediaArray: messageToCreate.media?.length > 0,
-        mediaCount: messageToCreate.media?.length || 0
-      });
-
-      // Create message in MongoDB
       let message = await Message.create(messageToCreate);
 
-      // Populate message
       message = await Message.findById(message._id)
         .populate('sender', 'name profilePicture firebaseUid')
         .populate('chat');
 
-      // Update chat's latest message
       await Chat.findByIdAndUpdate(messageData.chat, {
         latestMessage: message._id,
         updatedAt: new Date()
       });
 
-      // ✅ FORMAT FOR SOCKET EMISSION (INCLUDE ALL MEDIA DATA)
+      // Format for socket with metadata
       const formattedMessage = {
         _id: message._id,
         content: message.content,
@@ -1197,47 +1286,45 @@ message = await Message.findById(message._id)
         },
         chat: message.chat._id,
         messageType: message.messageType,
-        // ✅ CRITICAL: Include ALL media fields for frontend
         fileUrl: message.fileUrl,
-        media: message.media, // ✅ This is what frontend needs!
+        media: message.media,
         image: message.image,
         video: message.video,
         fileName: message.fileName,
         fileSize: message.fileSize,
         thumbnailUrl: message.thumbnailUrl,
         mimeType: message.mimeType,
-        // Status and timestamps
+        // ✅ RETURN METADATA TO FRONTEND
+        metadata: message.metadata || messageData.metadata || {},
         status: message.status,
         createdAt: message.createdAt,
         updatedAt: message.updatedAt
       };
 
-      console.log('✅ Media message created:', {
-        messageId: message._id,
-        hasMediaArray: formattedMessage.media?.length > 0,
-        mediaUrl: formattedMessage.media?.[0]?.url?.substring(0, 50) + '...'
-      });
-
-      // ✅ EMIT TO SENDER FOR CONFIRMATION
+      // Confirm to sender with metadata
       socket.emit('message_sent', {
         messageId: message._id,
         chatId: messageData.chat,
         status: 'sent',
+        // ✅ INCLUDE METADATA IN CONFIRMATION
+        metadata: formattedMessage.metadata,
+        uploadId: messageData.metadata?.uploadId,
+        tempMessageId: messageData.metadata?.tempMessageId,
         timestamp: new Date().toISOString(),
         isMedia: true,
         hasMedia: !!formattedMessage.media
       });
 
-      // ✅ BROADCAST TO ALL USERS IN CHAT
-      io.to(messageData.chat).emit('message received', formattedMessage);
+      // Broadcast with metadata
+      io.to(messageData.chat).emit('messageReceived', formattedMessage);
       
-      console.log(`📡 Media message broadcast to chat ${messageData.chat}`);
-      
-      return; // Exit early for media messages
+      return; // Exit early
     }
 
     // ✅ REGULAR TEXT MESSAGES HANDLING
-    console.log('📝 Processing as REGULAR TEXT message');
+    console.log('📝 Processing REGULAR TEXT message with metadata:', {
+      metadata: messageData.metadata
+    });
     
     // Find user
     const user = await User.findOne({ firebaseUid: messageData.sender });
@@ -1245,29 +1332,29 @@ message = await Message.findById(message._id)
       throw new Error(`User not found: ${messageData.sender}`);
     }
 
-    // Create message for regular text
+    // Create message with metadata
     let message = await Message.create({
       sender: user._id,
       chat: messageData.chat,
       content: messageData.content,
       messageType: messageData.messageType || 'text',
+      // ✅ PRESERVE METADATA
+      metadata: messageData.metadata || {},
       status: 'sent',
       deliveredTo: [],
       readBy: []
     });
 
-    // Populate message
     message = await Message.findById(message._id)
       .populate('sender', 'name profilePicture firebaseUid')
       .populate('chat');
 
-    // Update chat
     await Chat.findByIdAndUpdate(messageData.chat, {
       latestMessage: message._id,
       updatedAt: new Date()
     });
 
-    // ✅ Format for frontend
+    // Format with metadata
     const formattedMessage = {
       _id: message._id,
       content: message.content,
@@ -1279,25 +1366,34 @@ message = await Message.findById(message._id)
       },
       chat: message.chat._id,
       messageType: message.messageType,
+      // ✅ RETURN METADATA
+      metadata: message.metadata || messageData.metadata || {},
       status: message.status,
       createdAt: message.createdAt,
       updatedAt: message.updatedAt
     };
 
-    console.log('✅ Regular message created:', message._id);
+    console.log('✅ Regular message created with metadata:', {
+      messageId: message._id,
+      metadata: formattedMessage.metadata
+    });
 
-    // ✅ SEND CONFIRMATION TO SENDER
+    // ✅ SEND CONFIRMATION TO SENDER WITH METADATA
     socket.emit('message_sent', {
       messageId: message._id,
       chatId: messageData.chat,
       status: 'sent',
+      // ✅ INCLUDE METADATA
+      metadata: formattedMessage.metadata,
+      uploadId: messageData.metadata?.uploadId,
+      tempMessageId: messageData.metadata?.tempMessageId,
       timestamp: new Date().toISOString()
     });
 
-    // ✅ BROADCAST TO ALL USERS IN CHAT
-    io.to(messageData.chat).emit('message received', formattedMessage);
+    // ✅ BROADCAST TO ALL USERS IN CHAT WITH METADATA
+    io.to(messageData.chat).emit('messageReceived', formattedMessage);
     
-    console.log(`📡 Regular message broadcast to chat ${messageData.chat}`);
+    console.log(`📡 Message broadcast with metadata to chat ${messageData.chat}`);
 
   } catch (error) {
     console.error('❌ [send_message] Error:', error);
@@ -1517,7 +1613,7 @@ socket.on('share_post', async (shareData) => {
     });
 
     // ✅ BROADCAST TO ALL USERS IN CHAT
-    io.to(shareData.chat).emit('message received', formattedMessage);
+    io.to(shareData.chat).emit('messageReceived', formattedMessage);
     
     // Also emit for backward compatibility
     io.to(shareData.chat).emit('new_message', formattedMessage);

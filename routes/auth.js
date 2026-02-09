@@ -271,6 +271,59 @@ router.post('/resync-all-users', async (req, res) => {
   }
 });
 
+/*
+// ============================================
+// SIMPLE TOKEN EXTRACTION (FIXED)
+// ============================================
+const extractUserFromToken = (req, res, next) => {
+  try {
+    console.log('\n🔐 === TOKEN EXTRACTION ===');
+    
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('⚠️ No Bearer token found');
+      req.user = null;
+      return next();
+    }
+    
+    const token = authHeader.split(' ')[1];
+    console.log('📌 Token received, length:', token.length);
+    
+    try {
+      // Decode the token without verification
+      const decoded = jwt.decode(token);
+      
+      if (!decoded) {
+        console.log('❌ Failed to decode token');
+        req.user = null;
+        return next();
+      }
+      
+      console.log('✅ Token decoded successfully');
+      
+      // Store basic info for now
+      req.user = {
+        firebaseUid: decoded.user_id || decoded.sub || decoded.uid,
+        token: token,
+        decoded: decoded
+      };
+      
+      next();
+      
+    } catch (decodeError) {
+      console.log('❌ Token decode error:', decodeError.message);
+      req.user = null;
+      next();
+    }
+    
+  } catch (error) {
+    console.error('❌ Token extraction error:', error);
+    req.user = null;
+    next();
+  }
+}; */
+
 // In routes/auth.js, replace extractUserFromToken function:
 
 const extractUserFromToken = async (req, res, next) => {
