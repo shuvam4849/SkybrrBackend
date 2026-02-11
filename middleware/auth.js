@@ -32,25 +32,88 @@ const protect = async (req, res, next) => {
       const decodedToken = await auth.verifyIdToken(token);
       console.log('✅ Firebase token verified for user:', decodedToken.uid);
       
-      // Find user by Firebase UID
-      let user = await User.findOne({ firebaseUid: decodedToken.uid });
+ // Find user by Firebase UID
+let user = await User.findOne({ firebaseUid: decodedToken.uid });
+
+if (!user) {
+  console.log('👤 Creating new user in backend database');
+  
+  try {
+    // Get user info from Firebase
+    const firebaseUser = await auth.getUser(decodedToken.uid);
+    
+    // Check what auth method was used
+    let email = null;
+    let phone = null;
+    
+    if (firebaseUser.email) {
+      // User registered with email
+      email = firebaseUser.email;
+      phone = null;
+    } else {
+      // User registered with phone
+      email = null;
+      // Extract phone from Firebase (might be in phoneNumber field)
+      phone = firebaseUser.phoneNumber || null;
+    }
+    
+    // Check if user already exists with this email/phone
+    let existingUser = null;
+    if (email) {
+      existingUser = await User.findOne({ email });
+    } else if (phone) {
+      existingUser = await User.findOne({ phone });
+    }
+    
+    if (existingUser) {
+      // Update existing user with firebaseUid
+      existingUser.firebaseUid = decodedToken.uid;
+      await existingUser.save();
+      user = existingUser;
+      console.log('✅ Updated existing user with Firebase UID');
+    } else {
+      // Create new user
+      user = await User.create({
+        firebaseUid: decodedToken.uid,
+        name: firebaseUser.displayName || 'User',
+        email: email,
+        phone: phone,
+        profilePicture: firebaseUser.photoURL || null,
+        isOnline: false,
+        lastSeen: new Date(),
+        authMethod: email ? 'email' : (phone ? 'phone' : 'unknown')
+      });
+      console.log('✅ Created new user with', email ? 'email' : 'phone');
+    }
+    
+  } catch (error) {
+    console.error('❌ Error creating user:', error.message);
+    
+    if (error.code === 11000) {
+      console.log('🔄 Duplicate key error - user might already exist');
+      user = await User.findOne({ firebaseUid: decodedToken.uid });
       
       if (!user) {
-        // Get user info from Firebase
-        const firebaseUser = await auth.getUser(decodedToken.uid);
-        
+        // Emergency: Create minimal user
         user = await User.create({
           firebaseUid: decodedToken.uid,
-          name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
-          email: firebaseUser.email || `${decodedToken.uid}@unknown.com`,
-          profilePicture: firebaseUser.photoURL || null,
+          name: 'User',
+          // Don't set email or phone to avoid duplicates
           isOnline: false,
           lastSeen: new Date()
         });
-        console.log('✅ Created new user from Firebase:', user._id);
-      } else {
-        console.log('✅ Existing user found:', user._id);
+        console.log('🚨 Created minimal user without email/phone');
       }
+    } else {
+      throw error;
+    }
+  }
+} else {
+  console.log('✅ Existing user found:', user._id);
+}
+
+req.user = user;
+next();
       
       req.user = user;
       console.log('🔐 User set in request:', req.user._id);
